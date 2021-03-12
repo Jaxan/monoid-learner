@@ -1,0 +1,27 @@
+cabal-version:       2.2
+name:                monoid-learner
+version:             0.1.0.0
+author:              Joshua Moerman
+maintainer:          joshua@cs.rwth-aachen.de
+build-type:          Simple
+
+common stuff
+  default-language: Haskell2010
+  ghc-options: -Wall -O2
+  build-depends:
+    base >=4.12 && <5,
+    containers,
+    HaskellForMaths >=0.4
+
+library
+  import: stuff
+  hs-source-dirs: src
+  exposed-modules:
+    KnuthBendix,
+    MStar
+
+executable monoid-learner
+  import: stuff
+  hs-source-dirs: app
+  main-is: Main.hs
+  build-depends: monoid-learner
