@@ -7,7 +7,6 @@ build-type:          Simple
 
 common stuff
   default-language: Haskell2010
-  ghc-options: -Wall -O2
   build-depends:
     base >=4.12 && <5,
     containers,
@@ -24,4 +23,15 @@ executable monoid-learner
   import: stuff
   hs-source-dirs: app
   main-is: Main.hs
-  build-depends: monoid-learner
+  ghc-options: -Wall -O2
+  build-depends:
+    monoid-learner
+
+test-suite test
+  import: stuff
+  hs-source-dirs: test
+  main-is: test.hs
+  type: exitcode-stdio-1.0
+  build-depends:
+    monoid-learner,
+    hedgehog
