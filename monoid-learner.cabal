@@ -16,8 +16,12 @@ library
   import: stuff
   hs-source-dirs: src
   exposed-modules:
+    Equivalence,
+    Examples.Examples,
     KnuthBendix,
-    MStar
+    Monoid,
+    MStar,
+    Word
 
 executable monoid-learner
   import: stuff
@@ -34,4 +38,5 @@ test-suite test
   type: exitcode-stdio-1.0
   build-depends:
     monoid-learner,
-    hedgehog
+    tasty,
+    tasty-hunit

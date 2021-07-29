@@ -9,28 +9,25 @@ module MStar where
 -- This is a rough sketch, and definitely not cleaned up.
 
 import qualified Data.List as List
-import Data.Map (Map)
+import Data.Map (Map, (!))
 import qualified Data.Map as Map
 import Data.Maybe (listToMaybe)
-import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Data.Set (Set)
 import qualified Data.Set as Set
+import Monoid (Alphabet, MonoidAcceptor (..))
+import Word
 import Prelude hiding (Word)
 
-type Word a = Seq a
-type Alphabet a = Set a
 type MembershipQuery m a = Word a -> m Bool
+
+type EquivalenceQuery m a q = MonoidAcceptor a q -> m (Maybe (Word a))
 
 squares :: Ord a => Set (Word a) -> Set (Word a)
 squares l = Set.map (uncurry (<>)) (Set.cartesianProduct l l)
 
 setPlus :: Ord a => Set a -> Set (Word a) -> Set (Word a)
 setPlus alph rows = Set.map pure alph `Set.union` squares rows
-
--- Left and Right concats, these are like columns, but they act
--- both left and right. Maybe a better word would be "tests".
-type Context a = (Word a, Word a)
 
 type Index a = Word a
 
@@ -43,20 +40,29 @@ data State a = State
   }
   deriving (Show, Eq)
 
+-- Data type for extra information during M*'s execution
+data LogMessage a
+  = NewRow (Word a)
+  | NewContext (Context a)
+  | Stage String
+  deriving (Show, Eq)
+
+type Logger m a = LogMessage a -> m ()
+
 -- Row data for an index
 row :: Ord a => State a -> Index a -> Map (Context a) Bool
-row State {..} m = Map.fromSet (\(l, r) -> cache Map.! (l <> m <> r)) contexts
+row State {..} m = Map.fromSet (\ctx -> cache ! apply ctx m) contexts
 
 -- Difference of two rows (i.e., all contexts in which they differ)
 difference :: Ord a => State a -> Index a -> Index a -> [Context a]
-difference State {..} m1 m2 = [(l, r) | (l, r) <- Set.toList contexts, cache Map.! (l <> m1 <> r) /= cache Map.! (l <> m2 <> r)]
+difference State {..} m1 m2 = [ctx | ctx <- Set.toList contexts, cache ! apply ctx m1 /= cache ! apply ctx m2]
 
 -- Initial state of the algorithm
 initialState :: (Monad m, Ord a) => Alphabet a -> MembershipQuery m a -> m (State a)
 initialState alphabet mq = do
   let rows = Set.singleton Seq.empty
       contexts = Set.singleton (Seq.empty, Seq.empty)
-      initialQueries = Set.map (\(m, (l, r)) -> l <> m <> r) $ Set.cartesianProduct (setPlus alphabet rows) contexts
+      initialQueries = Set.map (uncurry apply) (Set.cartesianProduct contexts (setPlus alphabet rows))
       initialQueriesL = Set.toList initialQueries
   results <- mapM mq initialQueriesL
   let cache = Map.fromList (zip initialQueriesL results)
@@ -67,7 +73,6 @@ initialState alphabet mq = do
         cache = cache,
         alphabet = alphabet
       }
-
 
 -- CLOSED --
 -- Returns all pairs which are not closed
@@ -86,16 +91,16 @@ fixClosed2 :: Set (Index a) -> Maybe (Word a)
 fixClosed2 = listToMaybe . List.sortOn Seq.length . Set.toList
 
 -- Adds a new element
-addRow :: (Monad m, Ord a) => Index a -> MembershipQuery m a -> State a -> m (State a)
-addRow m mq s@State {..} = do
+addRow :: (Monad m, Ord a) => Logger m a -> Index a -> MembershipQuery m a -> State a -> m (State a)
+addRow logger m mq s@State {..} = do
+  logger (NewRow m)
   let newRows = Set.insert m rows
-      queries = Set.map (\(mi, (l, r)) -> l <> mi <> r) $ Set.cartesianProduct (setPlus alphabet newRows) contexts
+      queries = Set.map (uncurry apply) (Set.cartesianProduct contexts (setPlus alphabet newRows))
       queriesRed = queries `Set.difference` Map.keysSet cache
       queriesRedL = Set.toList queriesRed
   results <- mapM mq queriesRedL
   let dCache = Map.fromList (zip queriesRedL results)
   return $ s {rows = newRows, cache = cache <> dCache}
-
 
 -- CONSISTENT --
 -- Not needed when counterexamples are added as columns, the table
@@ -116,16 +121,16 @@ fixConsistent s ((m1, m2, n1, n2, (l, r) : _) : _) = Just . head . Prelude.filte
     valid c = not (Set.member c (contexts s))
 
 -- Adds a test
-addContext :: (Monad m, Ord a) => Context a -> MembershipQuery m a -> State a -> m (State a)
-addContext lr mq s@State {..} = do
+addContext :: (Monad m, Ord a) => Logger m a -> Context a -> MembershipQuery m a -> State a -> m (State a)
+addContext log lr mq s@State {..} = do
+  log (NewContext lr)
   let newContexts = Set.insert lr contexts
-      queries = Set.map (\(m, (l, r)) -> l <> m <> r) $ Set.cartesianProduct (setPlus alphabet rows) newContexts
+      queries = Set.map (uncurry apply) (Set.cartesianProduct newContexts (setPlus alphabet rows))
       queriesRed = queries `Set.difference` Map.keysSet cache
       queriesRedL = Set.toList queriesRed
   results <- mapM mq queriesRedL
   let dCache = Map.fromList (zip queriesRedL results)
   return $ s {contexts = newContexts, cache = cache <> dCache}
-
 
 -- ASSOCIATIVITY --
 -- Returns non-associativity results. Implemented in a brute force way
@@ -144,24 +149,9 @@ fixAssociative [] _ _ = return Nothing
 fixAssociative ((_, _, _, _, _, []) : _) _ _ = error "Cannot happen assoc"
 fixAssociative ((m1, m2, m3, m12, m23, e@(l, r) : _) : _) mq table = do
   b <- mq (l <> m1 <> m2 <> m3 <> r)
-  if row table (m12 <> m3) Map.! e /= b
+  if row table (m12 <> m3) ! e /= b
     then return (Just (l, m3 <> r))
     else return (Just (l <> m1, r))
-
-
--- Abstract data type for a monoid. The map from the alphabet
--- determines the homomorphism from Words to this monoid
-data MonoidAcceptor a q = MonoidAcceptor
-  { elements :: [q], -- set of elements
-    unit :: q, -- the unit element
-    multiplication :: q -> q -> q, -- multiplication functions
-    accept :: q -> Bool, -- accepting subset
-    alph :: a -> q -- map from alphabet
-  }
-
--- Given a word, is it accepted by the monoid?
-acceptMonoid :: MonoidAcceptor a q -> Word a -> Bool
-acceptMonoid MonoidAcceptor {..} w = accept (foldr multiplication unit (fmap alph w))
 
 -- HYPOTHESIS --
 -- Syntactic monoid construction
@@ -170,43 +160,69 @@ constructMonoid s@State {..} =
   MonoidAcceptor
     { elements = [0 .. Set.size allRows - 1],
       unit = unit,
-      multiplication = curry (multMap Map.!),
-      accept = (accMap Map.!),
-      alph = rowToInt . Seq.singleton -- incorrect if symbols behave trivially
+      multiplication = curry (multMap !),
+      accept = (accMap !),
+      alph = rowToInt . Seq.singleton
     }
   where
     allRows = Set.map (row s) rows
     rowMap = Map.fromList (zip (Set.toList allRows) [0 ..])
-    rowToInt m = rowMap Map.! row s m
+    rowToInt m = rowMap ! row s m
     unit = rowToInt Seq.empty
-    accMap = Map.fromList [(rowMap Map.! r, r Map.! (Seq.empty, Seq.empty)) | r <- Set.toList allRows]
+    accMap = Map.fromList [(rowMap ! r, r ! (Seq.empty, Seq.empty)) | r <- Set.toList allRows]
     multList = [((rowToInt m1, rowToInt m2), rowToInt (m1 <> m2)) | m1 <- Set.toList rows, m2 <- Set.toList rows]
     multMap = Map.fromList multList
 
-
 -- Learns until it can construct a monoid
--- Please do counterexample handling yourself
-learn :: (Monad m, Ord a) => MembershipQuery m a -> State a -> m (State a)
-learn mq = makeClosedAndConsistentAndAssoc
+fixTable :: (Monad m, Ord a) => Logger m a -> MembershipQuery m a -> State a -> m (State a)
+fixTable logger mq = makeClosedAndConsistentAndAssoc
   where
     makeClosed s = do
+      logger (Stage "MakeClosed")
       case fixClosed2 $ closed s of
         Just m -> do
-          s2 <- addRow m mq s
+          s2 <- addRow logger m mq s
           makeClosed s2
         Nothing -> return s
     makeClosedAndConsistent s = do
       s2 <- makeClosed s
+      logger (Stage "MakeConsistent")
       case fixConsistent s2 $ consistent s2 of
         Just c -> do
-          s3 <- addContext c mq s2
+          s3 <- addContext logger c mq s2
           makeClosedAndConsistent s3
         Nothing -> return s2
     makeClosedAndConsistentAndAssoc s = do
       s2 <- makeClosedAndConsistent s
+      logger (Stage "MakeAssociative")
       result <- fixAssociative (associative s2) mq s2
       case result of
         Just a -> do
-          s3 <- addContext a mq s2
+          s3 <- addContext logger a mq s2
           makeClosedAndConsistentAndAssoc s3
         Nothing -> return s2
+
+learn :: (Monad m, Ord a) => Logger m a -> MembershipQuery m a -> EquivalenceQuery m a Int -> State a -> m (State a, MonoidAcceptor a Int)
+learn logger mq eq = loop
+  where
+    loop s = do
+      -- First make the table closed and so on
+      logger (Stage "Closing et al the table")
+      s2 <- fixTable logger mq s
+      -- Construct the monoid
+      let m = constructMonoid s2
+      -- Query equivalence
+      logger (Stage "Hypothesis")
+      result <- eq m
+      case result of
+        -- If Nothing, it is correct and we terminate
+        Nothing -> pure (s2, m)
+        -- Else we have a counterexample
+        Just w -> do
+          -- We split the counterexample into an existing row and new context
+          let apcs = foldMap (`infixResiduals` w) (rows s2 `Set.union` setPlus (alphabet s2) (rows s2))
+              filtered = filter (\lr -> not (lr `Set.member` contexts s2)) apcs
+              sorted = List.sortOn (\(l, r) -> let (ll, rr) = (Seq.length l, Seq.length r) in (ll + rr, max ll rr)) filtered
+              ctx = head sorted
+          s3 <- addContext logger ctx mq s2
+          loop s3
